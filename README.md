@@ -23,8 +23,8 @@ Sweet-GitOpsO-Mine/
 │  │  │  ├─ src/...
 │  │  │  ├─ Dockerfile
 │  │  │  └─ tests/
-│  │  └─ microservice-B/ ...
-│  └─charts/ # Helm charts (one per microservice; optional library chart)
+│  │  └─ microservice-b/ ...
+│  └─ charts/ # Helm charts (one per microservice; optional library chart)
 └─ gitops-repo/
    ├─ argocd/
    │  ├─projects/
@@ -40,8 +40,10 @@ Sweet-GitOpsO-Mine/
    │  ├─ app-service/
    │  └─ platform/
    └─ prod/
-      ├─ app-service/
-      └─ platform/
+      ├─ cluster-a/
+      │  ├─ app-service/
+      │  └─ platform/
+      └─ cluster-b/ ...
 ```
 
 ### Key points
@@ -74,27 +76,27 @@ We implement **three workflows** to cover CI, promotions, and rollbacks.
 
 ### 3.1 `ci-promote-to-dev.yaml` (CI + auto PR to dev)
 
-**Trigger:** push/PR to `app-code/services/<service>/` or a tag (e.g., `service-A-v1.4.2`).
+**Trigger:** push/PR to `app-code/microservices/<service>/` or a tag (e.g., `service-A-v1.4.2`).
 
 **Steps (per service):**
 1. **Build & test**: Lint, unit/integration tests.
 2. **Container build**: Build image with labels (git SHA, version), push to registry (e.g., GHCR).
 3. **Security gates**: SAST, dependency and image scanning (e.g., CodeQL, Trivy).
 4. **Update GitOps**:  
-   - Bump the **image tag** in `gitops-repo/dev/app-service/<service>/values.yaml` (or in the service’s Helm values path if stored alongside app-code).  
+   - Bump the **image tag** in `gitops-repo/dev/<cluster>/app/values.yaml`.  
    - Open an **automatic PR** to `gitops-repo` with a conventional commit message (e.g., `feat(service-A): dev-> image v1.4.2 (sha abc123)`).
 5. **Auto-merge** (dev only): If checks pass & required reviewers (dev owners) approve, merge the PR.
 
-**CD effect:** Post-merge, **Argo CD detects Git change** and reconciles the dev environment. Canary (if Rollouts enabled in dev) proceeds automatically.
+**CD effect:** Post-merge, **Argo CD detects Git change** and reconciles the dev environment.
 
 ### 3.2 `promote.yaml` (manual promotion to staging/prod)
 
 **Trigger:** `workflow_dispatch` with inputs:
-- `service` (A, B, …), `version` (tag/SHA), `target_env` (`staging` or `prod`), optional `location` filter for prod, and `strategy` (e.g., `canary10-30-60`, `bluegreen`).
+- `version` (tag/SHA), `target_env` (`staging` or `prod`), optional `location` filter for prod, and `strategy` (e.g., `canary10-30-60`, `bluegreen`).
 
 **Steps:**
 1. **Validate artifact**: Check that the image/tag exists and was tested in dev.
-2. **Prepare change**: Update `gitops-repo/<env>/app-service/<service>/values.yaml` with the chosen image tag and rollout strategy parameters (traffic steps, analysis templates).
+2. **Prepare change**: Update `gitops-repo/<env>/<cluster>/app/values.yaml` with the chosen image tag and rollout strategy parameters (traffic steps, analysis templates).
 3. **Create PR**: Assign to environment **CODEOWNERS** (SRE/Platform for prod), require **approval**.
 4. **Post-merge gates**:  
    - **Staging**: Auto-sync; Argo Rollouts runs a short canary with automated **Prometheus-based Analysis**.  
@@ -102,10 +104,10 @@ We implement **three workflows** to cover CI, promotions, and rollbacks.
 
 ### 3.3 `rollback.yaml` (git-revert per stage)
 
-**Trigger:** `workflow_dispatch` with inputs: `env`, `service`, `to_revision` (optional).
+**Trigger:** `workflow_dispatch` with inputs: `env`, `to_revision` (optional).
 
 **Approach:**
-- **Git revert** the last “promote” commit in `gitops-repo/<env>/app-service/<service>`, or set the image tag back to a **known-good** version.
+- **Git revert** the last “promote” commit in `gitops-repo/<env>/<cluster>/app/<service>`, or set the image tag back to a **known-good** version.
 - Open PR → fast-track approval for emergencies.
 - Merge → Argo CD reconciles → **Argo Rollouts** aborts canary (if ongoing) and promotes **stable** (previous ReplicaSet) automatically; or the straight deployment rolls back to the reverted tag.
 
@@ -140,11 +142,6 @@ We implement **three workflows** to cover CI, promotions, and rollbacks.
 
 We standardize on **Prometheus Operator stack** (commonly shipped via the `kube-prometheus-stack` Helm chart) plus Grafana.
 
-### Prometheus Operator CRDs (key ones to “bring by name”)
-- **Prometheus**, **Alertmanager**, **ThanosRuler**  
-- **ServiceMonitor**, **PodMonitor**, **Probe**, **ScrapeConfig**  
-- **PrometheusRule**, **AlertmanagerConfig**
-
 **How we use them:**
 - Platform **ApplicationSet** deploys the operator stack to each cluster.
 - Teams define **ServiceMonitor/PodMonitor** for each service; scrape labels live in the service Helm chart.
@@ -167,16 +164,7 @@ We standardize on **Prometheus Operator stack** (commonly shipped via the `kube-
 
 ---
 
-## 8) Helm conventions
-
-- One **Helm chart per microservice**, optionally using a shared **library chart** for common bits (probes, ports, ServiceMonitors, Rollout templates).
-- Values layering: `values.common.yaml` + `values.<env>.yaml` with **image tag**, **replicas**, **resources**, **HPA**, **rollout strategy**, **ServiceMonitor** toggles.
-- Chart **schema.yaml** validates required values (image, ports, liveness/readiness probes).
-- **Helm releases are immutable by env**; environment changes only flow via Git PRs.
-
----
-
-## 9) Tool choices — why these?
+## 8) Tool choices — why these?
 
 ### Why **GitHub Actions** for CI (vs GitLab CI or Jenkins)
 - **Tight GitHub integration**: native triggers on PRs, checks, environments, and CODEOWNERS; no extra connectors.  
@@ -202,40 +190,6 @@ We standardize on **Prometheus Operator stack** (commonly shipped via the `kube-
 - **CNCF-standard, vendor-neutral** metrics stack that scales horizontally.  
 - **Prometheus Operator CRDs** give declarative service discovery and alerting; **Grafana** provides flexible, versioned dashboards.  
 - **Tight integration** with Argo Rollouts for data-driven canaries and with HPA via custom metrics.
-
----
-
-## 10) Governance, safety, and guardrails
-
-- **Branch protections**:  
-  - Dev: 1 review; Staging: 1–2 reviews; Prod: 2 reviews + CODEOWNERS + signed commits.  
-- **Environments** (Actions): required reviewers/approvals for deploys to staging/prod.  
-- **Secrets**: SOPS/SealedSecrets (team decision); no plaintext secrets in repos.  
-- **Policies**: Kyverno/Gatekeeper for image pinning, resource limits, namespace quotas.  
-- **Supply chain**: image signing (cosign), SBOMs, provenance, registry tag immutability.  
-- **Backups/DR**: Prometheus PVs, Grafana config, and Argo CD state backed up or declaratively reconstructed via bootstrap.
-
----
-
-## 11) What might be missing / assumptions & open questions
-
-**Assumptions made**  
-- Cloud vendor-agnostic (traffic steering across clusters may use DNS/anycast or a managed global LB).  
-- Container registry is GHCR (could be ECR/GCR/ACR).  
-- Secrets via SOPS or SealedSecrets; choose one.  
-- Not all prod locations have non-prod counterparts—handled via **cluster labels**.
-
-**Gaps to clarify / next steps**
-- **Secrets strategy**: SOPS vs SealedSecrets; KMS/KeyVault selection.  
-- **Global traffic**: exact choice (e.g., external DNS + geo-routing, multi-cluster gateway, service mesh).  
-- **Data layer**: DB migration/rollback strategy (Liquibase/Flyway) tied to app rollout gates.  
-- **Logging & tracing**: e.g., Loki/ELK and Tempo/Jaeger to complement metrics.  
-- **Cost & capacity**: budgets, autoscaling limits, and HPA signals per service.  
-- **SLOs**: define golden signals and alert policies per service.  
-- **Access model**: who can promote to which env; emergency rollback privileges.  
-- **Compliance**: image/vuln policies and periodic scans.  
-- **Disaster recovery**: backup/restore playbooks and test cadence.  
-- **Release cadence**: semantic versioning, release notes, and change ticket linkage.
 
 ---
 
