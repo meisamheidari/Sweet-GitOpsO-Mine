@@ -11,7 +11,7 @@ This design proposes a pragmatic GitOps workflow to deploy a multi-service appli
 
 We use a **mono-repo** with two top-level roots:
 
-
+```bash
 Sweet-GitOpsO-Mine/
 ├─ .github/workflows/
 │  ├─ ci-promote-to-dev.yaml
@@ -42,7 +42,7 @@ Sweet-GitOpsO-Mine/
    └─ prod/
       ├─ app-service/
       └─ platform/
-
+```
 
 ### Key points
 
